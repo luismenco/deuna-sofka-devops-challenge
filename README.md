@@ -1,0 +1,1 @@
+# deuna-softka-devops-challenge
