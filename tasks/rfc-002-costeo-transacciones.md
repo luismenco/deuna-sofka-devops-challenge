@@ -4,15 +4,15 @@
 
 Deuna! procesa transacciones monetarias y no monetarias sobre una arquitectura de microservicios en AWS.
 
-Cada flujo transaccional de Deuna! (monetario y no monetario) consume un conjunto diferente de servicios AWS: Lambda, API Gateway, RDS Aurora, SQS, S3, entre otros. Cada servicio tiene su propio modelo de costeo. Los servicios son en su mayoría compartidos entre flujos.
+Cada flujo transaccional consume un conjunto diferente de servicios AWS como Lambda, API Gateway, RDS Aurora, SQS y S3. Cada servicio tiene su propio modelo de costeo y gran parte de la infraestructura es compartida entre los diferentes flujos.
 
-Se requiere estimar cuánto cuesta procesar una transacción monetaria y una no monetaria, utilizando información de consumo de los flujos y los costos reportados por AWS.
+Para este escenario propongo una solución que permita estimar cuánto cuesta procesar una transacción monetaria y una no monetaria, utilizando el consumo observado en los flujos y los costos reportados por AWS.
 
 ## 2. Definición del problema
 
-AWS permite conocer el costo y consumo de los recursos utilizados por medio de AWS Cost Explorer, pero en infraestructura compartida este costo no puede asociarse directamente a una transacción monetaria o no monetaria.
+AWS permite consultar el costo y consumo de los recursos mediante herramientas como AWS Cost Explorer, pero cuando la infraestructura es compartida este costo no puede asociarse directamente a una transacción monetaria o no monetaria.
 
-Por ejemplo, Cost Explorer puede mostrar el costo por servicio durante un período, e incluso filtrar por tags configurados a nivel de cada servicio (team,servicio,componente,ambiente,etc):
+Por ejemplo, Cost Explorer puede mostrar el costo por servicio durante un período y permitir filtros mediante tags como `team`, `service`, `component` o `environment`:
 
 | Servicio AWS | Costo mensual |
 | --- | ---: |
@@ -24,42 +24,42 @@ Por ejemplo, Cost Explorer puede mostrar el costo por servicio durante un perío
 | Amazon S3 | $200 |
 | **Total** | **$14,000** |
 
-Esta información permite conocer cuánto cuesta cada servicio, pero no entrega el valor o costo x transacción.
+Esta información permite conocer cuánto cuesta cada servicio, pero no cuánto cuesta procesar cada tipo de transacción.
 
-Para calcular el costo por tipo de transacción necesitamos identificar si una transacción es monetaria o no monetaria y mantener esta información durante todo su flujo.
+Para realizar esta estimación necesito identificar si una transacción es `MONETARY` o `NON_MONETARY`, mantener esta información durante su recorrido y relacionar el consumo observado con los costos reportados por AWS.
 
-Los costos debemos dividirlos en dos grupos:
+Para el cálculo dividiría los costos en dos grupos:
 
-- **Costos directos:** servicios cuyo consumo podemos relacionar con cada tipo de transacción.
-- **Costos compartidos:** servicios utilizados por ambos tipos de transacción, cuyo costo debe distribuirse proporcionalmente.
+- **Costos directos:** servicios cuyo consumo puedo relacionar con cada tipo de transacción.
+- **Costos compartidos:** servicios utilizados por ambos tipos de transacción y cuyo costo necesito distribuir utilizando un driver definido.
 
-El resultado será una estimación del costo por tipo de transacción y no un cálculo exacto por request individual.
+El resultado será una estimación del costo promedio por tipo de transacción y no un cálculo exacto por request individual.
 
 ## 3. Objetivos
 
 - Identificar las transacciones como `MONETARY` o `NON_MONETARY`.
 - Mantener el tipo de transacción durante todo el flujo.
 - Obtener los costos de los servicios utilizados en AWS.
-- Diferenciar entre costos directos y costos compartidos.
-- Distribuir los costos compartidos entre ambos tipos de transacción.
-- Calcular el costo aproximado por transacción.
-- Automatizar la recolección y cálculo de esta información.
-- Presentar los resultados a los equipos de producto y finanzas.
+- Diferenciar costos directos y compartidos.
+- Definir un criterio simple para distribuir los costos compartidos.
+- Calcular el costo aproximado por tipo de transacción.
+- Automatizar la recolección y cálculo de la información.
+- Presentar los resultados a producto y finanzas.
 
 ## 4. Solución propuesta
 
 ### 4.1 Identificación y medición de transacciones
 
-Las aplicaciones se instrumentan con **OpenTelemetry** para identificar el tipo de transacción y generar métricas de consumo por servicio.
+Propongo instrumentar las aplicaciones con **OpenTelemetry** para identificar el tipo de transacción y generar métricas de consumo por servicio.
 
-Cada transacción se clasifica utilizando el atributo:
+Cada transacción se clasificaría utilizando atributos como:
 
 ```text
-transaction.id= "UUID"
+transaction.id   = "UUID"
 transaction.type = "MONETARY | NON_MONETARY"
 ```
 
-Para identificar el componente que procesa la transacción se utiliza `service.name`, permitiendo agrupar las métricas por servicio y tipo de transacción.
+Para identificar el componente que procesa la transacción utilizaría `service.name`, lo que permite agrupar las métricas por servicio y tipo de transacción.
 
 Ejemplo:
 
@@ -70,9 +70,9 @@ transactions_total{
 }
 ```
 
-En flujos síncronos, `transaction.type` se mantiene durante las llamadas entre microservicios. En flujos asíncronos, como SQS, se propaga como metadata del mensaje para que el consumidor mantenga la clasificación original.
+En flujos síncronos mantendría `transaction.type` durante las llamadas entre microservicios. En flujos asíncronos, como SQS, propagaría esta información como metadata del mensaje para que el consumidor mantenga la clasificación original.
 
-La telemetría generada se envía a la plataforma de observabilidad existente, donde se puede consultar el volumen procesado por cada servicio.
+La telemetría se enviaría a la plataforma de observabilidad existente, donde podría consultar el volumen procesado por cada servicio.
 
 | Servicio | MONETARY | NON_MONETARY | Total |
 | --- | ---: | ---: | ---: |
@@ -80,17 +80,17 @@ La telemetría generada se envía a la plataforma de observabilidad existente, d
 | transactions-worker | 1,500,000 | 500,000 | 2,000,000 |
 | customer-api | 0 | 4,000,000 | 4,000,000 |
 
-Estas métricas permiten conocer qué servicios participan en cada tipo de transacción y qué proporción de su carga corresponde a cada categoría. Esta información será utilizada posteriormente como entrada para el modelo de atribución de costos.
+Estas métricas me permiten conocer qué servicios participan en cada tipo de transacción y qué proporción de su consumo corresponde a cada categoría. Esta información será una de las entradas para el modelo de atribución de costos.
 
 ### 4.2 Modelo de atribución de costos
 
-Los costos los clasificaria en dos grupos según la posibilidad de relacionar su consumo con las transacciones procesadas.
+Clasificaría los costos en dos grupos según la posibilidad de relacionar su consumo con las transacciones procesadas.
 
 #### Costos directos
 
-Para servicios donde es posible medir el consumo por tipo de transacción, la atribución se realiza utilizando las métricas obtenidas en el punto anterior.
+Para servicios donde puedo medir el consumo por tipo de transacción utilizaría las métricas obtenidas en el punto anterior como driver de atribución.
 
-Ejemplos:
+Por ejemplo:
 
 | Servicio | Driver de atribución |
 | --- | --- |
@@ -99,14 +99,14 @@ Ejemplos:
 | SQS | Mensajes procesados |
 | S3 | Requests/operaciones |
 
-Para un servicio que procesa ambos tipos de transacción se calcula la proporción de consumo:
+Para un componente utilizado por ambos tipos de transacción calcularía la proporción de consumo:
 
 ```text
 MONETARY     = requests MONETARY / requests totales
 NON_MONETARY = requests NON_MONETARY / requests totales
 ```
 
-Esta proporción se aplica al costo del servicio obtenido desde AWS.
+Después aplicaría esta proporción al costo del componente obtenido desde AWS.
 
 Ejemplo:
 
@@ -124,7 +124,7 @@ NON_MONETARY = $250
 
 #### Costos compartidos
 
-Para componentes donde no existe una relación directa entre una transacción y el modelo de facturación, como Aurora o capacidad compartida de ECS, se utiliza inicialmente el volumen de transacciones como driver de distribución.
+Para componentes donde no puedo relacionar directamente el modelo de facturación con una transacción, como Aurora o capacidad compartida de ECS, utilizaría inicialmente el volumen de transacciones como driver de distribución.
 
 Ejemplo:
 
@@ -140,15 +140,15 @@ MONETARY     = $2,400
 NON_MONETARY = $5,600
 ```
 
-Este modelo mantiene el cálculo simple y trazable. Si se requiere mayor precisión,podemos evolucionar utilizando métricas específicas de cada servicio, por ejemplo duración y memoria en Lambda, consumo de CPU/memoria en ECS o carga e I/O en Aurora.
+Inicialmente mantendría este modelo simple y trazable. Si posteriormente se requiere mayor precisión, lo evolucionaría utilizando drivers específicos, por ejemplo duración y memoria en Lambda, CPU/memoria en ECS o carga e I/O en Aurora.
 
 ### 4.3 Obtención de costos desde AWS
 
-Para obtener la información de costos se utilizan los servicios de **AWS Billing and Cost Management**.
+Para obtener los costos utilizaría los servicios de **AWS Billing and Cost Management**.
 
-**AWS Cost Explorer** se utiliza para consultar y validar los costos por servicio, cuenta, región, período y tags de asignación de costos.
+Utilizaría **AWS Cost Explorer** principalmente para consultar y validar costos por servicio, cuenta, región, período y tags de asignación de costos.
 
-Para alimentar el proceso automatizado se propone utilizar **AWS Data Exports / Cost and Usage Report (CUR)**, almacenando la información detallada de costos y uso en Amazon S3.
+Para alimentar el proceso automatizado utilizaría **AWS Data Exports / Cost and Usage Report (CUR)**, almacenando la información detallada de costos y uso en Amazon S3.
 
 ```text
 AWS Billing
@@ -160,10 +160,13 @@ Data Exports / CUR
 Amazon S3
      │
      ▼
+Athena
+     │
+     ▼
 Costos por servicio/componente
 ```
 
-Los recursos AWS deben mantener una estrategia de tagging consistente que permita identificar el componente al que pertenece el costo.
+Mantendría además una estrategia de tagging consistente para poder relacionar los registros de billing con los componentes de la plataforma.
 
 Por ejemplo:
 
@@ -176,24 +179,26 @@ team        = transactions
 
 ### 4.4 Pipeline automatizado de cálculo
 
-El cálculo se ejecuta mediante un proceso batch mensual iniciado por **EventBridge Scheduler**.
+Para automatizar el cálculo propongo un proceso batch mensual iniciado por **EventBridge Scheduler**.
+
+Elegiría una ejecución mensual porque el objetivo no requiere calcular costos en tiempo real y permite trabajar con la información consolidada de billing del período.
 
 ![cost-calculation](../diagrams/rfc-002-costeo-transacciones.png)
 
-La función Lambda actúa como procesador del modelo de costos y utiliza dos fuentes de información:
+Utilizaría una función Lambda como procesador del modelo de costos con dos fuentes principales de información:
 
-- **Costos AWS:** costos del período consultados desde los datos de AWS Data Exports / CUR mediante Athena.
+- **Costos AWS:** obtenidos desde AWS Data Exports / CUR y consultados mediante Athena.
 - **Métricas transaccionales:** cantidad de transacciones `MONETARY` y `NON_MONETARY` obtenidas desde la plataforma de observabilidad.
 
-El proceso ejecuta los siguientes pasos:
+El proceso sería:
 
-1. Obtiene los costos AWS del período agrupados por servicio o componente.
-2. Obtiene la cantidad de transacciones `MONETARY` y `NON_MONETARY` procesadas por cada componente.
-3. Calcula la proporción de consumo por tipo de transacción.
-4. Distribuye el costo de cada componente utilizando el modelo definido en `4.2`.
-5. Suma los costos atribuidos a cada tipo de transacción.
-6. Divide el costo total atribuido entre la cantidad de transacciones procesadas.
-7. Almacena el resultado mensual en S3.
+1. Consultar los costos AWS del período agrupados por servicio o componente.
+2. Consultar las transacciones `MONETARY` y `NON_MONETARY` procesadas por cada componente.
+3. Calcular la proporción de consumo por tipo de transacción.
+4. Aplicar el modelo de atribución definido en `4.2`.
+5. Sumar los costos atribuidos a cada tipo de transacción.
+6. Dividir el costo atribuido entre la cantidad de transacciones procesadas.
+7. Almacenar el resultado mensual en S3.
 
 #### Ejemplo de cálculo
 
@@ -205,7 +210,7 @@ NON_MONETARY   = 400 transacciones
 TOTAL          = 1,000 transacciones
 ```
 
-Para componentes donde existe una métrica de consumo por `transaction.type`, se utiliza la distribución observada en ese componente.
+Para componentes donde tengo una métrica de consumo por `transaction.type`, utilizaría la distribución observada en cada componente.
 
 Por ejemplo:
 
@@ -227,7 +232,7 @@ MONETARY       = 900 invocaciones (90%) → $180
 NON_MONETARY   = 100 invocaciones (10%) → $20
 ```
 
-Para infraestructura compartida donde no existe una métrica directa de consumo por tipo, se utiliza como driver inicial la proporción global de transacciones:
+Para infraestructura compartida donde no tengo una métrica directa de consumo por tipo utilizaría inicialmente la proporción global de transacciones:
 
 ```text
 Aurora
@@ -237,7 +242,7 @@ MONETARY       = 60% → $300
 NON_MONETARY   = 40% → $200
 ```
 
-El resultado de la atribución sería:
+El resultado sería:
 
 | Componente | Costo AWS | MONETARY | NON_MONETARY |
 | --- | ---: | ---: | ---: |
@@ -246,7 +251,7 @@ El resultado de la atribución sería:
 | Aurora | $500 | $300 | $200 |
 | **Total** | **$800** | **$540** | **$260** |
 
-Finalmente se calcula el costo promedio por transacción:
+Finalmente calcularía el costo promedio por transacción:
 
 ```text
 MONETARY
@@ -263,15 +268,17 @@ El resultado mensual almacenado sería:
 | 2026-07 | MONETARY | 600 | $540 | $0.90 |
 | 2026-07 | NON_MONETARY | 400 | $260 | $0.65 |
 
-Para recursos compartidos como Aurora, la distribución por volumen de transacciones representa una primera aproximación. El modelo puede evolucionar utilizando drivers más específicos, como carga de base de datos, I/O o tiempo de ejecución, si se requiere mayor precisión.
+Para recursos compartidos como Aurora considero esta distribución una primera aproximación. Si el nivel de precisión requerido aumenta, utilizaría drivers más específicos como carga de base de datos, I/O o tiempo de ejecución.
 
-El proceso puede ejecutarse nuevamente para un período determinado si AWS registra ajustes posteriores en los datos de facturación.
+También permitiría reprocesar un período determinado si AWS registra posteriormente ajustes en la información de facturación.
 
 ### 4.5 Presentación de resultados
 
-Los resultados agregados se almacenan en S3 y se consultan mediante Athena. Para los equipos de producto y finanzas se propone un dashboard en **Amazon QuickSight o grafana**  con la información mensual de costos.
+Los resultados agregados quedarían almacenados en S3 y disponibles para consulta mediante Athena.
 
-El dashboard debe permitir visualizar:
+Para producto y finanzas presentaría la información mediante un dashboard en **Amazon QuickSight** o en la plataforma de visualización existente.
+
+Priorizaría indicadores que permitan entender rápidamente el costo de cada flujo:
 
 - Costo total por tipo de transacción.
 - Costo promedio por transacción `MONETARY` y `NON_MONETARY`.
@@ -287,4 +294,4 @@ Ejemplo:
 | Costo atribuido | $6,000 | $8,700 |
 | Costo promedio | $0.0020 | $0.00124 |
 
-Adicionalmente, el detalle por componente permite identificar qué servicios tienen mayor impacto sobre el costo de cada tipo de transacción.
+Mantendría también el detalle por componente para que ingeniería pueda identificar qué servicios tienen mayor impacto sobre el costo de cada tipo de transacción y dónde existen oportunidades de optimización.

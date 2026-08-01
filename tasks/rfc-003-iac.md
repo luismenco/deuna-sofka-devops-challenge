@@ -2,21 +2,21 @@
 
 ## 1. Contexto
 
-La infraestructura requerida se implementa utilizando **Terraform**, manteniendo los recursos AWS como código y permitiendo desplegar la misma arquitectura en diferentes ambientes.
+Para implementar la infraestructura requerida propongo utilizar **Terraform**, manteniendo la configuración de los recursos AWS como código y permitiendo reutilizar la misma implementación entre diferentes ambientes.
 
-La solución tiene los siguientes componentes:
+La solución incluye los siguientes componentes:
 
 - VPC con subnets públicas y privadas.
-- AWS KMS para encriptación de los servicios y los datos.
+- AWS KMS para encriptación de datos en reposo.
 - Amazon S3 para almacenamiento.
 - Amazon Aurora PostgreSQL.
-- AWS Secrets Manager para las credenciales de Aurora.
+- AWS Secrets Manager para gestionar las credenciales administrativas de Aurora.
 
-La implementación tiene una estructura modular, reutilizable y con controles de seguridad aplicados desde IaC.
+La implementación está organizada de forma modular para separar responsabilidades, reutilizar componentes y mantener las configuraciones específicas de cada ambiente fuera de los módulos.
 
 ## 2. Estructura del repositorio
 
-El código Terraform se encuentra organizado dentro del directorio `terraform/`:
+Organicé el código dentro del directorio `terraform/` de la siguiente forma:
 
 ```text
 terraform/
@@ -56,11 +56,18 @@ terraform/
 └── outputs.tf
 ```
 
-Los módulos encapsulan la implementación de cada componente y el módulo raíz define las dependencias entre ellos.
+Utilizo `modules/` para encapsular cada componente de infraestructura y mantener responsabilidades separadas. El módulo raíz se encarga de consumir estos módulos y definir sus dependencias.
 
-Los archivos dentro de `workspaces/` contienen las configuraciones específicas de cada ambiente, como CIDRs, Availability Zones, configuración de NAT Gateway y parámetros que pueden variar entre ambientes `dev`, `staging` y `prod`.
+En `workspaces/` mantengo los valores específicos de cada ambiente, por ejemplo:
 
-Terraform Workspaces se utilizan para mantener un estado independiente por ambiente:
+- CIDRs.
+- Availability Zones.
+- Subnets.
+- NAT Gateway.
+- Retención de backups.
+- Configuraciones que puedan variar entre `dev`, `staging` y `prod`.
+
+Para separar el estado de cada ambiente utilizo Terraform Workspaces:
 
 ```bash
 terraform workspace select dev
@@ -72,88 +79,102 @@ terraform apply -var-file="workspaces/dev.tfvars"
 terraform destroy -var-file="workspaces/dev.tfvars"
 ```
 
+De esta forma separo la configuración del ambiente mediante `.tfvars` y su estado mediante Terraform Workspaces.
+
 ## 3. Componentes implementados
 
 ### 3.1 VPC
 
-El módulo `vpc` crea la infraestructura base de red:
+Aunque el reto no requiere explícitamente crear la VPC, decidí incluir un módulo básico de networking para poder desplegar Aurora sobre una red controlada.
+
+El módulo crea:
 
 - VPC.
 - Subnets públicas distribuidas entre Availability Zones.
 - Subnets privadas distribuidas entre Availability Zones.
 - Internet Gateway para las subnets públicas.
-- NAT Gateway configurable para salida a Internet desde las subnets privadas. (futuros componentes como servicios de ecs o lambdas)
+- NAT Gateway configurable para salida a Internet desde las subnets privadas.
 - Route Tables y asociaciones correspondientes.
 
 Aurora se despliega únicamente sobre las subnets privadas.
 
+Dejé el NAT Gateway configurable para evitar su costo en ambientes que no lo requieran y habilitarlo cuando existan workloads privados que necesiten salida a Internet, por ejemplo futuros servicios ECS o funciones Lambda.
+
 ### 3.2 KMS
 
-Se crea una Customer Managed KMS Key simétrica utilizada para encriptar los recursos que manejan información sensible.
+Implementé una **Customer Managed KMS Key** simétrica para centralizar la encriptación de los recursos que manejan información sensible.
 
 La configuración incluye:
 
 - `SYMMETRIC_DEFAULT`.
-- Uso `ENCRYPT_DECRYPT`.
-- Rotación automática habilitada.
+- `ENCRYPT_DECRYPT`.
+- Rotación automática.
 - Ventana de eliminación configurable.
 - Alias para facilitar su identificación.
 - Key Policy basada en least privilege.
 
-La policy diferencia entre ARNS que administran la llave y ARNS que únicamente requieren utilizarla para operaciones criptográficas.
+La Key Policy diferencia los principals que pueden administrar la llave de aquellos que únicamente necesitan utilizarla para operaciones criptográficas.
+
+Esto permite evitar asignar permisos administrativos de KMS a workloads que solamente requieren cifrar o descifrar información.
 
 ### 3.3 S3
 
-El módulo S3 implementa:
+Para S3 implementé los siguientes controles:
 
-- Server-side encryption con la KMS Key creada.
-- S3 Bucket Key habilitada.
+- Server-side encryption utilizando la KMS Key creada.
+- S3 Bucket Key.
 - Versionado.
 - Block Public Access.
 - `BucketOwnerEnforced`.
-- Lifecycle policy para costos (finops)
-- Restricción de conexiones sin TLS mediante Bucket Policy(https only).
+- Lifecycle policy.
+- Restricción de conexiones sin TLS mediante Bucket Policy.
 
-El lifecycle permite mover información a clases de almacenamiento de menor costo y administrar versiones anteriores de los objetos.
+Además de seguridad, incluí algunas consideraciones de costo.
+
+S3 Bucket Key permite reducir las solicitudes realizadas hacia KMS y, por lo tanto, el costo asociado al uso de SSE-KMS.
+
+La Lifecycle Policy permite mover objetos a clases de almacenamiento de menor costo y administrar versiones anteriores según la política de retención definida.
 
 ### 3.4 Aurora PostgreSQL
 
-El cluster Aurora PostgreSQL se despliega utilizando las subnets privadas de la VPC.
+Aurora PostgreSQL se despliega únicamente sobre las subnets privadas de la VPC.
 
 La configuración incluye:
 
-- Encriptación en reposo con KMS.
+- Encriptación en reposo con la KMS Key.
 - DB Subnet Group privado.
 - Security Group dedicado.
-- Puerto PostgreSQL `5432` accesible únicamente desde Security Groups autorizados.
+- Puerto PostgreSQL `5432` restringido a Security Groups autorizados.
 - Backups automáticos.
 - Deletion Protection configurable por ambiente.
-- Final Snapshot para ambientes que lo requieran.
+- Final Snapshot cuando el ambiente lo requiera.
 - Performance Insights.
 - Enhanced Monitoring.
 
-No se permite acceso público a las instancias del cluster.
+No habilito acceso público a las instancias del cluster.
+
+La intención es que el acceso a la base de datos se realice únicamente desde workloads autorizados dentro de la red.
 
 ### 3.5 Secrets Manager
 
-Las credenciales administrativas de Aurora son gestionadas directamente por RDS utilizando:
+Para las credenciales administrativas de Aurora decidí utilizar la integración nativa entre RDS y AWS Secrets Manager:
 
 ```hcl
-master_username              = "pgadmin"
-manage_master_user_password  = true
+master_username             = "pgadmin"
+manage_master_user_password = true
 ```
 
-Esto permite que AWS genere y almacene las credenciales `username/password` en AWS Secrets Manager sin administrar la contraseña directamente desde Terraform.
-la credencial rota cada 7 dias por defectos, https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/rds-secrets-manager.html?utm_source=chatgpt.com#rds-secrets-manager-overview 
-El Secret utiliza la Customer Managed KMS Key definida para la solución.
+De esta forma no genero ni almaceno el password de `pgadmin` directamente en Terraform.
+
+RDS genera las credenciales y administra el Secret en AWS Secrets Manager. El Secret utiliza la Customer Managed KMS Key definida para la solución y RDS administra la rotación de las credenciales.
 
 El acceso al Secret se restringe mediante una Resource Policy a principals explícitamente autorizados.
 
-Para el ambiente de prueba se autoriza al principal utilizado para ejecutar Terraform. En un ambiente productivo este acceso debe asignarse únicamente a los IAM Roles de los workloads que requieran conectarse a la base de datos.
+Para el ambiente de prueba autorizo al principal utilizado para ejecutar Terraform. En producción reemplazaría este acceso por los IAM Roles específicos de los workloads que necesiten conectarse a Aurora.
 
 ## 4. Estado remoto de Terraform
 
-El estado de Terraform se almacena remotamente en Amazon S3.
+Para el estado de Terraform utilizo un backend remoto en Amazon S3:
 
 ```hcl
 terraform {
@@ -167,24 +188,25 @@ terraform {
 }
 ```
 
-Cada Terraform Workspace mantiene un estado independiente, evitando compartir el mismo estado entre `dev`, `staging` y `prod`.
+La decisión de utilizar estado remoto permite evitar archivos `tfstate` locales y facilita la ejecución de Terraform desde CI/CD o por diferentes miembros del equipo.
 
-El backend utiliza:
+Para el backend considero:
 
 - S3 para almacenamiento remoto.
 - Cifrado del state en reposo.
-- State locking mediante S3 lockfile.
-- Versionado del bucket de state para recuperación ante cambios accidentales.
+- S3 lockfile para evitar modificaciones concurrentes.
+- Versionado del bucket para recuperación ante cambios accidentales.
+- Un state independiente por Terraform Workspace.
 
-No se utiliza DynamoDB para locking, utilizando el mecanismo de locking soportado actualmente por el backend S3.
+No utilizo DynamoDB para state locking, ya que utilizo el mecanismo de lockfile soportado por el backend S3.
 
-El bucket utilizado como backend debe provisionarse previamente y mantenerse separado del state administrado por este repositorio.
+El bucket del backend debe existir previamente y mantenerse separado de los recursos administrados por este mismo state.
 
 ## 5. Validaciones antes del apply
 
-Antes de ejecutar cambios sobre AWS se propone ejecutar validaciones sintácticas, funcionales y de seguridad.
+Antes de ejecutar un `apply` propongo validar formato, configuración, seguridad y costo del cambio.
 
-El flujo mínimo es:
+Como validación básica ejecutaría:
 
 ```bash
 terraform fmt -check -recursive
@@ -195,39 +217,68 @@ terraform plan \
   -var-file="workspaces/dev.tfvars"
 ```
 
-Adicionalmente se pueden integrar las siguientes herramientas en CI/CD:
+Para un pipeline de CI/CD agregaría:
 
 | Herramienta | Uso |
 | --- | --- |
-| `terraform fmt` | Validación de formato |
-| `terraform validate` | Validación de configuración Terraform |
-| `TFLint` | Detección de errores y malas prácticas Terraform/AWS |
-| `Trivy` | Análisis de seguridad y configuracion de IaC |
-| `Infracost` | Estimación de costos |
-| `terraform plan` | Revisión de cambios antes del despliegue |
+| `terraform fmt` | Validar formato del código. |
+| `terraform validate` | Validar la configuración Terraform. |
+| `TFLint` | Detectar errores y malas prácticas de Terraform/AWS. |
+| `Trivy` | Detectar configuraciones inseguras en IaC. |
+| `Infracost` | Estimar el impacto en costos del cambio. |
+| `terraform plan` | Revisar los cambios antes del despliegue. |
+
+El flujo que propondría sería:
+
+```text
+Pull Request
+     │
+     ▼
+Terraform fmt / validate
+     │
+     ▼
+TFLint
+     │
+     ▼
+Trivy
+     │
+     ▼
+Infracost
+     │
+     ▼
+Terraform Plan
+     │
+     ▼
+Review / Approval
+     │
+     ▼
+Terraform Apply
+```
+
+Para producción, el `apply` requeriría aprobación previa después de revisar el resultado del `plan`, los controles de seguridad y el impacto estimado en costos.
 
 ## 6. Consideraciones de seguridad
 
-La implementación aplica los siguientes controles:
+Los principales controles que apliqué en la implementación son:
 
-- Encriptación con Customer Managed KMS Key.
+- Customer Managed KMS Key para encriptación.
 - Rotación automática de la KMS Key.
 - S3 sin acceso público.
 - Acceso a S3 únicamente mediante TLS.
 - Aurora desplegado en subnets privadas.
 - Aurora sin acceso público.
-- Security Groups basados en least privilege.
-- Credenciales de base de datos almacenadas en Secrets Manager.
-- Contraseña de `pgadmin` fuera del código Terraform.
-- Acceso al Secret restringido por IAM y Resource Policy.
-- Estado Terraform almacenado remotamente y cifrado.
-- Validación de seguridad de IaC antes del despliegue.
+- Security Groups con acceso restringido.
+- Credenciales de `pgadmin` fuera del código Terraform.
+- Credenciales administradas mediante Secrets Manager.
+- Acceso al Secret restringido mediante IAM y Resource Policy.
+- Terraform State remoto y cifrado.
+- Validaciones de seguridad antes del despliegue.
 
 ## 7. Despliegue por ambiente
 
-Cada ambiente utiliza un Terraform Workspace y su correspondiente archivo de variables.
+Cada ambiente utiliza un Terraform Workspace y su correspondiente archivo `.tfvars`.
 
-Ejemplo para `dev`:
+Por ejemplo, para `dev`:
 
 ```bash
 terraform init
@@ -241,7 +292,7 @@ terraform apply \
   -var-file="workspaces/dev.tfvars"
 ```
 
-Para un nuevo ambiente:
+Para crear un nuevo ambiente:
 
 ```bash
 terraform workspace new staging
@@ -250,4 +301,4 @@ terraform plan \
   -var-file="workspaces/staging.tfvars"
 ```
 
-Este modelo permite reutilizar los mismos módulos manteniendo configuración y estado independientes para cada ambiente.
+Con este modelo puedo reutilizar los mismos módulos y mantener separados tanto la configuración como el estado de cada ambiente.
