@@ -39,7 +39,7 @@ La propiedad `scaledToMax = true` permite identificar específicamente una activ
 
 La solución utiliza **Amazon EventBridge** para capturar eventos generados por Application Auto Scaling cuando ocurre una actividad de escalamiento sobre los servicios ECS.
 
-![ecs-events](../diagrams/frc-001-ecs-events.png)
+![ECS Auto Scaling Event Flow](../diagrams/rfc-001-ecs-events.png)
 
 El flujo funciona de la siguiente manera:
 
