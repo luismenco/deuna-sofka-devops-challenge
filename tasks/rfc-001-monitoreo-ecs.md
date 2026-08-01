@@ -1,7 +1,5 @@
 # RFC-001 — Monitoreo de capacidad máxima de microservicios en Amazon ECS
 
-**Estado:** Propuesto
-
 ## 1. Contexto
 
 Deuna! opera múltiples microservicios sobre Amazon ECS, cada uno con límites independientes de escalamiento. Los servicios utilizan políticas de Auto Scaling basadas en CPU y memoria, con un umbral del 60 %, y pueden escalar horizontalmente hasta alcanzar la capacidad máxima configurada.
@@ -269,3 +267,6 @@ El cambio permanente de infraestructura se mantiene bajo el flujo normal de IaC,
 
 3. AWS — Application Auto Scaling `DescribeScalingActivities`  
    https://docs.aws.amazon.com/autoscaling/application/APIReference/API_DescribeScalingActivities.html
+
+4. AWS — Application Auto Scaling `scaledToMax`  
+   https://docs.aws.amazon.com/autoscaling/application/userguide/monitoring-eventbridge.html#event-example-1
