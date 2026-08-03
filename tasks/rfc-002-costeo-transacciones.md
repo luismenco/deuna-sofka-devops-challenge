@@ -375,7 +375,7 @@ $730 / 600 = $1.22 por transacción
 
 NON_MONETARY
 $470 / 400 = $1.18 por transacción
-
+```
 ### 4.5 Presentación de resultados
 
 Almacenaría los resultados mensuales en S3 y los dejaría disponibles para consulta mediante Athena.
@@ -419,4 +419,3 @@ Para **producto y finanzas**, priorizaría el costo promedio por tipo de transac
 Para **ingeniería**, mantendría el detalle por componente para identificar qué recursos tienen mayor impacto sobre el costo y dónde existen oportunidades de optimización.
 
 De esta forma, el mismo modelo permite tener una vista agregada orientada al negocio y una vista técnica para análisis y optimización de costos.
-```
