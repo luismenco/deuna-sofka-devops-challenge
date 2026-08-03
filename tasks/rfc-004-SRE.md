@@ -146,7 +146,6 @@ Incluiría:
 - **Resumen e impacto:** qué ocurrió, duración y servicios o transacciones afectadas.
 - **Timeline:** detección, diagnóstico, mitigación y recuperación.
 - **Root Cause:** causa principal del incidente.
-- **Factores contribuyentes:** condiciones que aumentaron el impacto.
 - **Mitigación:** acciones utilizadas para recuperar el servicio.
 - **Action Items:** mejoras identificadas y responsable.
 
